@@ -4,6 +4,42 @@ This is a starter for AI Chessathon, a chess-engine competition. The deliverable
 `agent.py`, exposing `get_move(fen, time_left_ms) -> str`. It gets zipped and uploaded, and the
 platform plays it against other people's agents on a fixed cadence.
 
+## Commit gate -- read this before changing agent.py
+
+Compliance with the published rules is the floor, not a nice-to-have, and it is checked
+*before* any change is judged on strength. Concretely, for any change that touches `agent.py`
+or `weights/`:
+
+1. Confirm the baseline still holds. Re-fetch the two canonical URLs below if you have not
+   checked them recently in this session, and re-read the quick reference here against them.
+   A change built on a stale understanding of the rules is not safe to commit no matter how it
+   scores.
+2. Run `make commit-gate` (this is also wired in as the pre-commit hook, see below, so it runs
+   automatically). It checks, in order:
+   - lint and types clean (`ruff`, `mypy`)
+   - the packaged submission is under the 50 MB unzipped cap -- treated as a hard fail here,
+     not the warning `harness/package.py` prints on its own, because the platform will reject
+     an oversize upload outright
+   - the working copy of `agent.py` (+ `weights/` if present) beats whatever is currently
+     committed, in a self-play arena match, by a real margin (default: score >= 55% over 40
+     games against the exact last-committed version, extracted straight from `git show HEAD:...`)
+3. Do not commit if any of the three fail. Do not weaken the gate (lower `--min-score`, cut
+   `--games`, edit `scripts/commit_gate.py` to be easier) to force a change through -- fix the
+   change or don't commit it.
+4. The default 40-game check is a coarse filter, not a significance test: at that sample size a
+   55% score is well within noise of a true 50%. Treat anything close as inconclusive and rerun
+   with more games (`make commit-gate GAMES=200`) rather than trusting the first number, and run
+   a much larger comparison before anything you are about to actually upload to the platform,
+   not just before a local commit.
+5. On the very first commit of a real agent there is nothing previous to compare against, so the
+   gate skips step 3's regression check automatically -- lint, types and size still apply.
+
+This is enforced, not just documented: `make setup` installs `scripts/pre-commit` as the git
+pre-commit hook, and it runs the full gate whenever `agent.py` or `weights/` are staged (a
+docs-only commit just gets lint+types, not a 40-game match). Never bypass it with
+`git commit --no-verify` -- if the gate is wrong for a situation, fix `scripts/commit_gate.py`
+deliberately and say so, don't route around it silently.
+
 ## Read the rules from the source
 
 The competition rules and the agent contract live on the site and change. Fetch them before you
@@ -76,6 +112,7 @@ make play      # one game against a baseline, real time control
 make arena     # 20 fast games against a baseline, with a score
 make zip       # build submission.zip with agent.py at the root
 make gate      # ruff, mypy, and two games that have to finish cleanly
+make commit-gate  # the full pre-commit policy: lint, size, and a strength check vs HEAD
 ```
 
 Nothing here decides whether an upload is accepted. The platform validates on upload and writes a

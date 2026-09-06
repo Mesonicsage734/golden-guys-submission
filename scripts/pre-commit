@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Installed by `make setup`. Full commit gate (lint, size, self-play vs the last commit) only
+# runs when agent.py or weights/ are actually staged -- a docs-only commit shouldn't need a
+# 40-game arena match. See scripts/commit_gate.py and AGENTS.md ("Commit gate") for the policy.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+staged=$(git diff --cached --name-only)
+if echo "$staged" | grep -qE '^(agent\.py|weights/)'; then
+    uv run python scripts/commit_gate.py
+else
+    uv run ruff check . && uv run mypy
+fi

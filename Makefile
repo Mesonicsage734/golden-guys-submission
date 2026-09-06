@@ -1,9 +1,11 @@
 SHELL := /bin/bash
 
-.PHONY: setup play arena zip gate
+.PHONY: setup play arena zip gate commit-gate
 
 setup:
 	uv sync
+	cp scripts/pre-commit .git/hooks/pre-commit
+	chmod +x .git/hooks/pre-commit
 
 play:
 	uv run python -m harness.play --white . --black baselines/greedy $(if $(FEN),--fen "$(FEN)")
@@ -18,3 +20,6 @@ gate:
 	uv run ruff check .
 	uv run mypy
 	uv run python -m harness.arena --opponent baselines/random --games 2 --base-ms 5000
+
+commit-gate:
+	uv run python scripts/commit_gate.py $(if $(GAMES),--games $(GAMES)) $(if $(MIN_SCORE),--min-score $(MIN_SCORE))

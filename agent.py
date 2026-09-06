@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import chess
 import chess.polyglot
@@ -17,6 +18,28 @@ MOVE_OVERHEAD_S = 0.3  # margin left on the clock for the watchdog and process o
 
 MAX_SEARCH_DEPTH = 64  # a generous safety cap; the deadline is what actually ends the search
 MATE_SCORE = 100_000.0
+
+BOOK_PATH = Path(__file__).resolve().parent / "book" / "book.bin"
+BOOK_PLY_LIMIT = 10  # only probe the book this early; theory runs out fast either way
+
+
+def _load_book(path: Path) -> dict[int, list[tuple[chess.Move, int]]]:
+    """Read book.bin (built by scripts/build_book.py) into a plain dict at import time.
+
+    Any failure here -- missing file, corrupt data -- falls back to an empty book rather
+    than a crash: an opening book is a nice-to-have, never worth an import-time failure.
+    """
+    book: dict[int, list[tuple[chess.Move, int]]] = {}
+    try:
+        with chess.polyglot.open_reader(path) as reader:
+            for entry in reader:
+                book.setdefault(entry.key, []).append((entry.move, entry.weight))
+    except Exception:
+        return {}
+    return book
+
+
+_BOOK = _load_book(BOOK_PATH)
 
 # Material in pawns, and piece-square bonuses in centipawns (hence the /100.0 in
 # _material_and_pst), from White's perspective with a1 == index 0. Mirror the square to
@@ -172,6 +195,10 @@ def _choose_move(board: chess.Board, deadline: Deadline) -> str:
     SearchTimeout without returning if the budget runs out partway through it, so
     `best_move` here only ever gets updated from a pass that scored every root move.
     """
+    book_move = _book_move(board)
+    if book_move is not None:
+        return book_move.uci()
+
     legal_moves = list(board.legal_moves)
     random.shuffle(legal_moves)
     legal_moves = _order_moves(board, legal_moves)
@@ -185,6 +212,29 @@ def _choose_move(board: chess.Board, deadline: Deadline) -> str:
         # deepening's classic free win for ordering, ahead of the real TT step 6 adds.
         legal_moves = _move_to_front(legal_moves, best_move)
     return best_move.uci()
+
+
+def _book_move(board: chess.Board) -> chess.Move | None:
+    """A known opening move for `board`, drawn from the book for only the first few plies.
+
+    Weighted random choice among whatever candidates the book offers at this position,
+    matching how a real polyglot book is normally consulted. Every candidate is checked
+    against the current legal moves before being trusted -- cheap insurance against a
+    Zobrist collision or an encoding bug turning a book hit into an illegal move.
+    """
+    if not _BOOK or len(board.move_stack) >= BOOK_PLY_LIMIT:
+        return None
+    candidates = _BOOK.get(chess.polyglot.zobrist_hash(board))
+    if not candidates:
+        return None
+    legal_moves = board.legal_moves
+    candidates = [(move, weight) for move, weight in candidates if move in legal_moves]
+    if not candidates:
+        return None
+    moves = [move for move, _ in candidates]
+    weights = [weight for _, weight in candidates]
+    choice: chess.Move = random.choices(moves, weights=weights, k=1)[0]
+    return choice
 
 
 def _search_root(

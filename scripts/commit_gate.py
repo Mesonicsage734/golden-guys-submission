@@ -60,7 +60,9 @@ def check_lint_and_types() -> bool:
 def check_size() -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "submission.zip"
-        result = run_text("uv", "run", "python", "-m", "harness.package", "--out", str(out))
+        result = run_text(
+            "uv", "run", "python", "-m", "harness.package", "--out", str(out), "--include", "book"
+        )
         print(result.stdout, end="")
         if result.returncode != 0:
             print(f"[gate] package build failed:\n{result.stderr}")

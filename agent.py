@@ -222,13 +222,63 @@ def _negamax(
             return -(MATE_SCORE + depth)  # fewer plies remaining here == a faster mate
         return 0.0  # stalemate
     if depth <= 0:
-        return _evaluate(board)
+        return _quiescence(board, alpha, beta, deadline, 0)
 
     best = float("-inf")
     for move in _order_moves(board, legal_moves):
         board.push(move)
         try:
             score = -_negamax(board, depth - 1, -beta, -alpha, deadline)
+        finally:
+            board.pop()
+        if score > best:
+            best = score
+        if best > alpha:
+            alpha = best
+        if alpha >= beta:
+            break
+    return best
+
+
+MAX_QUIESCENCE_PLY = 32  # a generous safety cap against runaway check-evasion recursion
+
+
+def _quiescence(
+    board: chess.Board, alpha: float, beta: float, deadline: Deadline, ply: int
+) -> float:
+    """Extend search through captures (and check evasions) past the horizon, so _negamax
+    never trusts a static evaluation in the middle of an exchange.
+
+    Not in check: standing pat is sound (a losing capture is never forced), so the static
+    eval is a lower bound and only captures are searched further. In check: standing pat
+    is unsound -- every legal reply is searched instead, exactly like _negamax's own
+    terminal handling, since a position can't be judged "quiet" while it's under attack.
+    """
+    deadline.check()
+    legal_moves = list(board.legal_moves)
+    in_check = board.is_check()
+    if not legal_moves:
+        if in_check:
+            return -(MATE_SCORE + ply)
+        return 0.0
+    if ply >= MAX_QUIESCENCE_PLY:
+        return _evaluate(board)
+
+    if in_check:
+        best = float("-inf")
+        candidates = legal_moves
+    else:
+        best = _evaluate(board)
+        if best >= beta:
+            return best
+        if best > alpha:
+            alpha = best
+        candidates = [move for move in legal_moves if board.is_capture(move)]
+
+    for move in _order_moves(board, candidates):
+        board.push(move)
+        try:
+            score = -_quiescence(board, -beta, -alpha, deadline, ply + 1)
         finally:
             board.pop()
         if score > best:

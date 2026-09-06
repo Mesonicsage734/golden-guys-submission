@@ -15,6 +15,86 @@ import chess.polyglot
 MIN_MOVES_REMAINING = 20  # assume at least this many moves left when nothing better is known
 MOVE_OVERHEAD_S = 0.3  # margin left on the clock for the watchdog and process overhead
 
+SEARCH_DEPTH = 3  # fixed for now; step 4 replaces this with iterative deepening
+MATE_SCORE = 100_000.0
+
+# Material in pawns, and piece-square bonuses in centipawns (hence the /100.0 in
+# _material_and_pst), from White's perspective with a1 == index 0. Mirror the square to
+# score a black piece.
+# Values are the well-known "simplified evaluation function" tables -- a hand-tuned starting
+# point, not learned and not lifted from another engine's source.
+PIECE_VALUES = {
+    chess.PAWN: 1.0,
+    chess.KNIGHT: 3.0,
+    chess.BISHOP: 3.0,
+    chess.ROOK: 5.0,
+    chess.QUEEN: 9.0,
+    chess.KING: 0.0,
+}
+
+PIECE_SQUARE_TABLES: dict[chess.PieceType, tuple[int, ...]] = {
+    chess.PAWN: (
+        0, 0, 0, 0, 0, 0, 0, 0,
+        5, 10, 10, -20, -20, 10, 10, 5,
+        5, -5, -10, 0, 0, -10, -5, 5,
+        0, 0, 0, 20, 20, 0, 0, 0,
+        5, 5, 10, 25, 25, 10, 5, 5,
+        10, 10, 20, 30, 30, 20, 10, 10,
+        50, 50, 50, 50, 50, 50, 50, 50,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ),
+    chess.KNIGHT: (
+        -50, -40, -30, -30, -30, -30, -40, -50,
+        -40, -20, 0, 5, 5, 0, -20, -40,
+        -30, 5, 10, 15, 15, 10, 5, -30,
+        -30, 0, 15, 20, 20, 15, 0, -30,
+        -30, 5, 15, 20, 20, 15, 5, -30,
+        -30, 0, 10, 15, 15, 10, 0, -30,
+        -40, -20, 0, 0, 0, 0, -20, -40,
+        -50, -40, -30, -30, -30, -30, -40, -50,
+    ),
+    chess.BISHOP: (
+        -20, -10, -10, -10, -10, -10, -10, -20,
+        -10, 5, 0, 0, 0, 0, 5, -10,
+        -10, 10, 10, 10, 10, 10, 10, -10,
+        -10, 0, 10, 10, 10, 10, 0, -10,
+        -10, 5, 5, 10, 10, 5, 5, -10,
+        -10, 0, 5, 10, 10, 5, 0, -10,
+        -10, 0, 0, 0, 0, 0, 0, -10,
+        -20, -10, -10, -10, -10, -10, -10, -20,
+    ),
+    chess.ROOK: (
+        0, 0, 0, 5, 5, 0, 0, 0,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        -5, 0, 0, 0, 0, 0, 0, -5,
+        5, 10, 10, 10, 10, 10, 10, 5,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ),
+    chess.QUEEN: (
+        -20, -10, -10, -5, -5, -10, -10, -20,
+        -10, 0, 5, 0, 0, 0, 0, -10,
+        -10, 5, 5, 5, 5, 5, 0, -10,
+        0, 0, 5, 5, 5, 5, 0, -5,
+        -5, 0, 5, 5, 5, 5, 0, -5,
+        -10, 0, 5, 5, 5, 5, 0, -10,
+        -10, 0, 0, 0, 0, 0, 0, -10,
+        -20, -10, -10, -5, -5, -10, -10, -20,
+    ),
+    chess.KING: (
+        20, 30, 10, 0, 0, 10, 30, 20,
+        20, 20, 0, 0, 0, 0, 20, 20,
+        -10, -20, -20, -20, -20, -20, -20, -10,
+        -20, -30, -30, -40, -40, -30, -30, -20,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+        -30, -40, -40, -50, -50, -40, -40, -30,
+    ),
+}
+
 # How many times we've been asked about each position (by Zobrist hash) this game. The
 # referee claims threefold repetition automatically, so a search that consults this can
 # avoid handing away a won game by shuffling into a draw. Nothing reads it yet -- later
@@ -73,18 +153,80 @@ def _remember(board: chess.Board) -> None:
 
 
 def _choose_move(board: chess.Board, deadline: Deadline) -> str:
-    """Placeholder search: step 2 replaces the body with real negamax + evaluation.
+    """Run negamax on each root move and keep the one with the best returned score.
 
-    The shape survives every later commit: walk the candidates, check the deadline before
-    each one, and keep the best-so-far ready to return the instant time runs out.
+    A root move is scored by searching several plies past it, never by evaluating the
+    resulting position directly -- _evaluate only ever runs at the leaves _negamax reaches.
     """
     legal_moves = list(board.legal_moves)
     random.shuffle(legal_moves)
-    best = legal_moves[0]
+    best_move = legal_moves[0]
+    best_score = float("-inf")
     try:
-        for candidate in legal_moves:
+        for move in legal_moves:
             deadline.check()
-            best = candidate
+            board.push(move)
+            try:
+                score = -_negamax(
+                    board, SEARCH_DEPTH - 1, float("-inf"), float("inf"), deadline
+                )
+            finally:
+                board.pop()
+            if score > best_score:
+                best_score = score
+                best_move = move
     except SearchTimeout:
         pass
-    return best.uci()
+    return best_move.uci()
+
+
+def _negamax(
+    board: chess.Board, depth: int, alpha: float, beta: float, deadline: Deadline
+) -> float:
+    """Return the score of `board` for the side to move, `depth` plies from here.
+
+    Fail-soft alpha-beta: `alpha`/`beta` are the caller's window in the side-to-move's own
+    sign convention (negamax), and a move that pushes the score at or past `beta` cuts the
+    rest of this node's siblings, since the opponent already has a better option elsewhere.
+    """
+    deadline.check()
+    legal_moves = list(board.legal_moves)
+    if not legal_moves:
+        if board.is_check():
+            return -(MATE_SCORE + depth)  # fewer plies remaining here == a faster mate
+        return 0.0  # stalemate
+    if depth <= 0:
+        return _evaluate(board)
+
+    best = float("-inf")
+    for move in legal_moves:
+        board.push(move)
+        try:
+            score = -_negamax(board, depth - 1, -beta, -alpha, deadline)
+        finally:
+            board.pop()
+        if score > best:
+            best = score
+        if best > alpha:
+            alpha = best
+        if alpha >= beta:
+            break
+    return best
+
+
+def _evaluate(board: chess.Board) -> float:
+    """Material plus piece-square tables, scored for the side to move (negamax convention)."""
+    score = _material_and_pst(board)
+    return score if board.turn == chess.WHITE else -score
+
+
+def _material_and_pst(board: chess.Board) -> float:
+    """Material plus piece-square tables, from White's perspective."""
+    score = 0.0
+    for piece_type, table in PIECE_SQUARE_TABLES.items():
+        value = PIECE_VALUES[piece_type]
+        for square in board.pieces(piece_type, chess.WHITE):
+            score += value + table[square] / 100.0
+        for square in board.pieces(piece_type, chess.BLACK):
+            score -= value + table[chess.square_mirror(square)] / 100.0
+    return score

@@ -101,6 +101,16 @@ PIECE_SQUARE_TABLES: dict[chess.PieceType, tuple[int, ...]] = {
 # commits wire it into move selection.
 _position_counts: dict[int, int] = {}
 
+TT_SIZE = 1 << 20  # slots; a fixed size bounds memory instead of growing for the whole game
+TT_EXACT, TT_LOWER, TT_UPPER = 0, 1, 2
+
+# One slot per (key & (TT_SIZE - 1)), always overwritten on collision -- simple, and the
+# memory cost is bounded by TT_SIZE regardless of how long the game runs (comfortably inside
+# the 2 GB budget: at a few hundred bytes a slot, a full table is well under 1 GB). Persists
+# across moves within a game (module state), reset fresh for the next one like everything else.
+TTEntry = tuple[int, int, float, int, chess.Move]
+_transposition_table: list[TTEntry | None] = [None] * TT_SIZE
+
 
 class SearchTimeout(Exception):
     """Raised to unwind a search cleanly once its time budget is spent."""
@@ -224,8 +234,26 @@ def _negamax(
     if depth <= 0:
         return _quiescence(board, alpha, beta, deadline, 0)
 
+    key = chess.polyglot.zobrist_hash(board)
+    slot = _transposition_table[key & (TT_SIZE - 1)]
+    tt_move = None
+    if slot is not None and slot[0] == key:
+        _, entry_depth, entry_score, entry_flag, entry_move = slot
+        tt_move = entry_move
+        if entry_depth >= depth:
+            if entry_flag == TT_EXACT:
+                return entry_score
+            if entry_flag == TT_LOWER:
+                alpha = max(alpha, entry_score)
+            elif entry_flag == TT_UPPER:
+                beta = min(beta, entry_score)
+            if alpha >= beta:
+                return entry_score
+
+    original_alpha = alpha
     best = float("-inf")
-    for move in _order_moves(board, legal_moves):
+    best_move = legal_moves[0]
+    for move in _order_moves(board, legal_moves, tt_move):
         board.push(move)
         try:
             score = -_negamax(board, depth - 1, -beta, -alpha, deadline)
@@ -233,10 +261,14 @@ def _negamax(
             board.pop()
         if score > best:
             best = score
+            best_move = move
         if best > alpha:
             alpha = best
         if alpha >= beta:
             break
+
+    flag = TT_UPPER if best <= original_alpha else TT_LOWER if best >= beta else TT_EXACT
+    _transposition_table[key & (TT_SIZE - 1)] = (key, depth, best, flag, best_move)
     return best
 
 
@@ -293,14 +325,22 @@ def _quiescence(
 CAPTURE_ORDER_SCALE = 10  # keeps victim value dominant over attacker value in the sort key
 
 
-def _order_moves(board: chess.Board, moves: list[chess.Move]) -> list[chess.Move]:
+def _order_moves(
+    board: chess.Board, moves: list[chess.Move], tt_move: chess.Move | None = None
+) -> list[chess.Move]:
     """Captures first, sorted by MVV-LVA; quiet moves keep the order they arrived in.
+    `tt_move`, if given, goes first of all -- it's the strongest ordering hint available,
+    coming from a previous search of this exact position.
 
     Doesn't change what _negamax evaluates, only the order it tries children in -- alpha-beta
     only prunes well when strong moves are seen first, so this is what turns step 2's search
     from full-width into something that actually benefits from the alpha-beta window.
     """
-    return sorted(moves, key=lambda move: _capture_score(board, move), reverse=True)
+
+    def score(move: chess.Move) -> float:
+        return float("inf") if move == tt_move else _capture_score(board, move)
+
+    return sorted(moves, key=score, reverse=True)
 
 
 def _capture_score(board: chess.Board, move: chess.Move) -> float:

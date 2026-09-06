@@ -61,7 +61,8 @@ def check_size() -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "submission.zip"
         result = run_text(
-            "uv", "run", "python", "-m", "harness.package", "--out", str(out), "--include", "book"
+            "uv", "run", "python", "-m", "harness.package", "--out", str(out),
+            "--include", "book", "--include", "syzygy",
         )
         print(result.stdout, end="")
         if result.returncode != 0:

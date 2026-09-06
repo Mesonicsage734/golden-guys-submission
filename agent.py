@@ -9,6 +9,7 @@ from pathlib import Path
 
 import chess
 import chess.polyglot
+import chess.syzygy
 
 # Import time runs once per game, inside a 90 second budget, before your clock starts.
 # Load weights and build tables out here, not inside get_move.
@@ -40,6 +41,24 @@ def _load_book(path: Path) -> dict[int, list[tuple[chess.Move, int]]]:
 
 
 _BOOK = _load_book(BOOK_PATH)
+
+SYZYGY_PATH = Path(__file__).resolve().parent / "syzygy"
+TABLEBASE_MAX_PIECES = 4  # matches the 3- and 4-man tables shipped in syzygy/
+
+
+def _load_tablebase(path: Path) -> chess.syzygy.Tablebase | None:
+    """Open the shipped Syzygy tables at import time.
+
+    Any failure here -- missing directory, corrupt files -- falls back to None rather than
+    a crash: an endgame tablebase is a nice-to-have, never worth an import-time failure.
+    """
+    try:
+        return chess.syzygy.open_tablebase(str(path))
+    except Exception:
+        return None
+
+
+_TABLEBASE = _load_tablebase(SYZYGY_PATH)
 
 # Material in pawns, and piece-square bonuses in centipawns (hence the /100.0 in
 # _material_and_pst), from White's perspective with a1 == index 0. Mirror the square to
@@ -199,6 +218,10 @@ def _choose_move(board: chess.Board, deadline: Deadline) -> str:
     if book_move is not None:
         return book_move.uci()
 
+    tablebase_move = _tablebase_move(board)
+    if tablebase_move is not None:
+        return tablebase_move.uci()
+
     legal_moves = list(board.legal_moves)
     random.shuffle(legal_moves)
     legal_moves = _order_moves(board, legal_moves)
@@ -235,6 +258,86 @@ def _book_move(board: chess.Board) -> chess.Move | None:
     weights = [weight for _, weight in candidates]
     choice: chess.Move = random.choices(moves, weights=weights, k=1)[0]
     return choice
+
+
+# The move played the last time we were asked about a given position (by Zobrist hash).
+# DTZ-minimizing is otherwise fully deterministic, so if an opponent's play ever brings a
+# position back around with us to move again, repeating our own past choice would repeat
+# the position too -- a real, observed failure mode (see the step 8 commit message).
+_last_move_from: dict[int, chess.Move] = {}
+
+
+def _tablebase_move(board: chess.Board) -> chess.Move | None:
+    """A tablebase-optimal move once few enough pieces remain, else None to keep searching.
+
+    Ranks each move by the resulting position's (WDL, DTZ) from the opponent's point of
+    view: WDL first, ascending, since a smaller (more negative) value is unconditionally
+    worse for the opponent regardless of ply count, and DTZ never orders correctly across
+    a WDL boundary (a "blessed loss" can carry a larger DTZ magnitude than an "unconditional
+    loss" a whole category better for us). Within the same WDL, prefer the larger DTZ: less
+    negative means the opponent is forced to lose in fewer plies; more positive means they
+    need more plies to beat us, i.e. the best available delay. Any probe failure (a table
+    genuinely missing, e.g. a capture down to a bare-kings position outside the 3-4 man set
+    we ship) aborts to the normal search entirely, rather than trusting a partial comparison.
+
+    Multiple moves often tie under this ranking, since it assumes a perfect defender on
+    both sides. Ties are broken with a simple, directly relevant heuristic: bring the two
+    kings closer together, the standard technique for actually cornering a lone king.
+    _evaluate is not that heuristic -- its king-square table rewards a castled-looking king
+    (corners, back rank), the opposite of what a king that has to help deliver mate needs.
+
+    If this exact position (us to move) has already occurred, the move played last time is
+    also excluded before tie-breaking -- otherwise a repeating opponent could still lock a
+    deterministic choice into repeating the position right back into a draw.
+    """
+    if (
+        _TABLEBASE is None
+        or board.castling_rights
+        or chess.popcount(board.occupied) > TABLEBASE_MAX_PIECES
+    ):
+        return None
+
+    key = chess.polyglot.zobrist_hash(board)
+    avoid = _last_move_from.get(key) if _position_counts.get(key, 0) > 1 else None
+    our_color = board.turn
+
+    best_rank: tuple[int, int] | None = None
+    candidates: list[chess.Move] = []
+    for move in board.legal_moves:
+        board.push(move)
+        try:
+            wdl = _TABLEBASE.probe_wdl(board)
+            dtz = _TABLEBASE.probe_dtz(board)
+        except Exception:
+            return None
+        finally:
+            board.pop()
+        rank = (wdl, -dtz)
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            candidates = [move]
+        elif rank == best_rank:
+            candidates.append(move)
+
+    if avoid in candidates and len(candidates) > 1:
+        candidates = [move for move in candidates if move != avoid]
+
+    chosen = min(candidates, key=lambda move: _king_distance_after(board, move, our_color))
+    _last_move_from[key] = chosen
+    return chosen
+
+
+def _king_distance_after(board: chess.Board, move: chess.Move, our_color: chess.Color) -> int:
+    """Chebyshev distance between the two kings after `move`, lower meaning closer."""
+    board.push(move)
+    try:
+        our_king = board.king(our_color)
+        their_king = board.king(not our_color)
+    finally:
+        board.pop()
+    if our_king is None or their_king is None:
+        return 8
+    return chess.square_distance(our_king, their_king)
 
 
 def _search_root(

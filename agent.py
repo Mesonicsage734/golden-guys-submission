@@ -15,7 +15,7 @@ import chess.polyglot
 MIN_MOVES_REMAINING = 20  # assume at least this many moves left when nothing better is known
 MOVE_OVERHEAD_S = 0.3  # margin left on the clock for the watchdog and process overhead
 
-SEARCH_DEPTH = 3  # fixed for now; step 4 replaces this with iterative deepening
+MAX_SEARCH_DEPTH = 64  # a generous safety cap; the deadline is what actually ends the search
 MATE_SCORE = 100_000.0
 
 # Material in pawns, and piece-square bonuses in centipawns (hence the /100.0 in
@@ -153,32 +153,57 @@ def _remember(board: chess.Board) -> None:
 
 
 def _choose_move(board: chess.Board, deadline: Deadline) -> str:
-    """Run negamax on each root move and keep the one with the best returned score.
+    """Iterative deepening: search depth 1, then 2, then 3..., always keeping the last
+    fully completed pass's best move ready to return the instant the deadline hits.
 
     A root move is scored by searching several plies past it, never by evaluating the
     resulting position directly -- _evaluate only ever runs at the leaves _negamax reaches.
+    An incomplete pass is discarded entirely rather than trusted: _search_root raises
+    SearchTimeout without returning if the budget runs out partway through it, so
+    `best_move` here only ever gets updated from a pass that scored every root move.
     """
     legal_moves = list(board.legal_moves)
     random.shuffle(legal_moves)
     legal_moves = _order_moves(board, legal_moves)
     best_move = legal_moves[0]
-    best_score = float("-inf")
-    try:
-        for move in legal_moves:
-            deadline.check()
-            board.push(move)
-            try:
-                score = -_negamax(
-                    board, SEARCH_DEPTH - 1, float("-inf"), float("inf"), deadline
-                )
-            finally:
-                board.pop()
-            if score > best_score:
-                best_score = score
-                best_move = move
-    except SearchTimeout:
-        pass
+    for depth in range(1, MAX_SEARCH_DEPTH + 1):
+        try:
+            best_move, _ = _search_root(board, legal_moves, depth, deadline)
+        except SearchTimeout:
+            break
+        # Seed the next, deeper pass with this depth's best move first -- iterative
+        # deepening's classic free win for ordering, ahead of the real TT step 6 adds.
+        legal_moves = _move_to_front(legal_moves, best_move)
     return best_move.uci()
+
+
+def _search_root(
+    board: chess.Board, moves: list[chess.Move], depth: int, deadline: Deadline
+) -> tuple[chess.Move, float]:
+    """Score every move in `moves` by negamax to `depth` plies and return the best.
+
+    Raises SearchTimeout (via deadline.check(), possibly from deep inside _negamax) the
+    moment the budget runs out, without returning -- the caller relies on this to discard
+    an incomplete pass rather than compare a partial subset of moves.
+    """
+    best_move = moves[0]
+    best_score = float("-inf")
+    for move in moves:
+        deadline.check()
+        board.push(move)
+        try:
+            score = -_negamax(board, depth - 1, float("-inf"), float("inf"), deadline)
+        finally:
+            board.pop()
+        if score > best_score:
+            best_score = score
+            best_move = move
+    return best_move, best_score
+
+
+def _move_to_front(moves: list[chess.Move], move: chess.Move) -> list[chess.Move]:
+    """Put `move` first for the next pass, keeping the rest in their existing order."""
+    return [move, *(candidate for candidate in moves if candidate != move)]
 
 
 def _negamax(

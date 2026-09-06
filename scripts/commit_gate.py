@@ -75,17 +75,45 @@ def check_size() -> bool:
     return True
 
 
+def _starter_agent_content() -> bytes | None:
+    """The placeholder agent.py this repo shipped with, straight from git history.
+
+    None if history doesn't have it (shallow clone, or agent.py was never committed).
+    """
+    added = run_text("git", "log", "--diff-filter=A", "--format=%H", "--follow", "--", "agent.py")
+    if added.returncode != 0 or not added.stdout.strip():
+        return None
+    first_commit = added.stdout.strip().splitlines()[-1]
+    show = run_bytes("git", "show", f"{first_commit}:agent.py")
+    return show.stdout if show.returncode == 0 else None
+
+
+def _head_is_unmodified_starter() -> bool:
+    """True if HEAD's agent.py is still exactly the random-mover placeholder.
+
+    There's no real agent committed yet in that case, even though the file is tracked --
+    the same "nothing to compare against" situation the very-first-commit check exists for.
+    """
+    starter = _starter_agent_content()
+    if starter is None:
+        return False
+    current = run_bytes("git", "show", "HEAD:agent.py")
+    return current.returncode == 0 and current.stdout == starter
+
+
 def extract_previous_submission(destination: Path) -> bool:
     """Copy whatever agent.py (+ weights/) HEAD has committed into `destination`.
 
     Returns False if there's nothing committed yet to compare against, so the very first
-    commit of a real agent isn't blocked waiting for an opponent that doesn't exist.
+    commit of a real agent isn't blocked waiting for an opponent that doesn't exist. That
+    covers both agent.py being untracked and it still being the unmodified starter --
+    beating a uniformly random mover isn't a meaningful regression test either way.
     """
     listing = run_text("git", "ls-tree", "-r", "--name-only", "HEAD")
     if listing.returncode != 0:
         return False
     tracked = [line for line in listing.stdout.splitlines() if line]
-    if "agent.py" not in tracked:
+    if "agent.py" not in tracked or _head_is_unmodified_starter():
         return False
     for name in tracked:
         if name != "agent.py" and not name.startswith("weights/"):

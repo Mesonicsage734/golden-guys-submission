@@ -32,7 +32,13 @@ or `weights/`:
    a much larger comparison before anything you are about to actually upload to the platform,
    not just before a local commit.
 5. On the very first commit of a real agent there is nothing previous to compare against, so the
-   gate skips step 3's regression check automatically -- lint, types and size still apply.
+   gate skips step 3's regression check automatically -- lint, types and size still apply. This
+   also covers the case where `agent.py` is tracked but HEAD's copy is still byte-identical to
+   the unmodified starter random-mover: beating a uniformly random mover isn't a meaningful
+   regression test, so a neutral, non-strength-changing commit (e.g. adding a safety-net wrapper
+   around the starter before any real search exists) can land without a fabricated "improvement"
+   over random play. The moment HEAD's `agent.py` differs from the starter, the regression check
+   is back in force for every commit after that.
 
 This is enforced, not just documented: `make setup` installs `scripts/pre-commit` as the git
 pre-commit hook, and it runs the full gate whenever `agent.py` or `weights/` are staged (a

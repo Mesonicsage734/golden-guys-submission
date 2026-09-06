@@ -160,6 +160,7 @@ def _choose_move(board: chess.Board, deadline: Deadline) -> str:
     """
     legal_moves = list(board.legal_moves)
     random.shuffle(legal_moves)
+    legal_moves = _order_moves(board, legal_moves)
     best_move = legal_moves[0]
     best_score = float("-inf")
     try:
@@ -199,7 +200,7 @@ def _negamax(
         return _evaluate(board)
 
     best = float("-inf")
-    for move in legal_moves:
+    for move in _order_moves(board, legal_moves):
         board.push(move)
         try:
             score = -_negamax(board, depth - 1, -beta, -alpha, deadline)
@@ -212,6 +213,30 @@ def _negamax(
         if alpha >= beta:
             break
     return best
+
+
+CAPTURE_ORDER_SCALE = 10  # keeps victim value dominant over attacker value in the sort key
+
+
+def _order_moves(board: chess.Board, moves: list[chess.Move]) -> list[chess.Move]:
+    """Captures first, sorted by MVV-LVA; quiet moves keep the order they arrived in.
+
+    Doesn't change what _negamax evaluates, only the order it tries children in -- alpha-beta
+    only prunes well when strong moves are seen first, so this is what turns step 2's search
+    from full-width into something that actually benefits from the alpha-beta window.
+    """
+    return sorted(moves, key=lambda move: _capture_score(board, move), reverse=True)
+
+
+def _capture_score(board: chess.Board, move: chess.Move) -> float:
+    """Most valuable victim, least valuable attacker. -1 for a quiet move (sorts last)."""
+    if not board.is_capture(move):
+        return -1.0
+    victim = chess.PAWN if board.is_en_passant(move) else board.piece_type_at(move.to_square)
+    attacker = board.piece_type_at(move.from_square)
+    victim_value = PIECE_VALUES[victim] if victim is not None else 0.0
+    attacker_value = PIECE_VALUES[attacker] if attacker is not None else 0.0
+    return CAPTURE_ORDER_SCALE * victim_value - attacker_value
 
 
 def _evaluate(board: chess.Board) -> float:
